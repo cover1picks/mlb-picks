@@ -1,0 +1,53 @@
+name: Daily MLB Report
+
+on:
+  schedule:
+    - cron: "0,30 11-23 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  daily-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run today's pipeline (auto mode -- may no-op if it's not time yet)
+        env:
+          STATS_MODE: api
+          ODDS_MODE: mock
+          PUBLIC_BETTING_MODE: manual
+          TIMEZONE: America/New_York
+          DAILY_RUN_HOUR: "10"
+          DAILY_RUN_MINUTE: "0"
+          AUTO_RUN_LEAD_MINUTES: "60"
+        run: python run_daily.py --auto
+
+      - name: Publish report + save history back to the repo
+        run: |
+          if [ -f data_store/reports/latest.html ]; then
+            cp data_store/reports/latest.html index.html
+          fi
+          git config user.name "mlb-picks-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -f index.html 2>/dev/null || true
+          git add -f data_store/betting_engine.db 2>/dev/null || true
+          git add -f data_store/last_published.txt 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Nothing new to publish this check."
+          else
+            git commit -m "Automated daily update ($(date -u +'%Y-%m-%d %H:%M UTC'))"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push
+          fi
