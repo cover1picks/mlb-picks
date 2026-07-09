@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14171c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="MLB Picks">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<title>MLB Betting Report — Sample</title>
+<style>
+  :root {
+    --bg: oklch(0.16 0.012 250);
+    --card: oklch(0.21 0.014 250);
+    --card-border: oklch(0.30 0.016 250);
+    --fg: oklch(0.94 0.006 250);
+    --muted: oklch(0.68 0.012 250);
+    --accent: oklch(0.75 0.19 155);
+    --accent-dim: oklch(0.32 0.06 155);
+    --warn: oklch(0.78 0.15 80);
+    --warn-dim: oklch(0.32 0.06 80);
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    padding: max(32px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(60px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+    background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .wrap { max-width: 780px; margin: 0 auto; }
+  .sample-banner { max-width: 780px; margin: 0 auto 24px; background: var(--warn-dim); border: 1px solid var(--warn);
+                   color: var(--fg); border-radius: 10px; padding: 12px 18px; font-size: 13px; text-align: center; }
+  .header { text-align: center; margin-bottom: 32px; }
+  .header h1 { font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  .header .date { font-size: 34px; font-weight: 700; margin: 0; }
+  .header .updated { font-size: 12px; color: var(--muted); margin: 10px 0 0; display: inline-flex; align-items: center; gap: 6px; }
+  .header .updated .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; flex-shrink: 0; }
+  .strip { display: flex; justify-content: center; gap: 24px; margin-top: 16px; flex-wrap: wrap; }
+  .strip .item { font-size: 13px; color: var(--muted); }
+  .strip .item b { color: var(--fg); }
+
+  .warnbox { background: var(--warn-dim); border: 1px solid var(--warn); color: var(--fg);
+             border-radius: 10px; padding: 14px 18px; margin-bottom: 24px; font-size: 14px; }
+  .warnbox ul { margin: 6px 0 0; padding-left: 18px; }
+
+  .play { background: var(--card); border: 1px solid var(--accent-dim); border-radius: 16px;
+          padding: 28px; margin-bottom: 20px; position: relative; overflow: hidden; }
+  .play::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 5px; background: var(--accent); }
+  .play .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); font-weight: 700; }
+  .play .team { font-size: 30px; font-weight: 800; margin: 6px 0 2px; }
+  .play .odds { color: var(--muted); font-size: 16px; font-family: "SF Mono", "Roboto Mono", monospace; }
+  .metrics { display: flex; gap: 28px; margin: 18px 0; flex-wrap: wrap; }
+  .metric .num { font-size: 22px; font-weight: 700; font-family: "SF Mono", "Roboto Mono", monospace; }
+  .metric .lbl { font-size: 11px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.05em; }
+  .stake { display: inline-block; background: var(--accent); color: oklch(0.16 0.01 155); font-weight: 700;
+           padding: 8px 16px; border-radius: 999px; font-size: 14px; margin-bottom: 16px; }
+  .flags { margin-bottom: 12px; }
+  .flag { display: inline-block; background: var(--warn-dim); color: var(--warn); border-radius: 8px;
+          padding: 6px 10px; font-size: 12px; margin: 2px 6px 2px 0; }
+  .why { font-size: 14px; color: var(--muted); margin-top: 12px; }
+  .why-title { color: var(--fg); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+  .why ul { margin: 0; padding-left: 18px; }
+  .why li { margin-bottom: 6px; }
+
+  .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+                    font-weight: 700; margin: 32px 0 12px; }
+
+  .parlay { background: var(--card); border: 1px dashed var(--accent); border-radius: 16px; padding: 22px; margin-bottom: 20px; }
+  .parlay .legs { font-size: 17px; font-weight: 700; margin-bottom: 6px; }
+  .parlay .odds { font-family: "SF Mono", "Roboto Mono", monospace; color: var(--accent); }
+  .parlay .note { color: var(--muted); font-size: 13px; margin-top: 8px; }
+
+  .prop-card { background: var(--card); border: 1px solid var(--card-border); border-radius: 12px;
+               padding: 16px 20px; margin-bottom: 12px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 16px; }
+  .prop-card .name { font-weight: 700; font-size: 16px; }
+  .prop-card .meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
+  .prop-card .score { font-size: 24px; font-weight: 800; color: var(--accent); font-family: "SF Mono", "Roboto Mono", monospace; flex-shrink: 0; }
+
+  .dropped { font-size: 13px; color: var(--muted); background: var(--card); border: 1px solid var(--card-border);
+             border-radius: 12px; padding: 16px 20px; margin-bottom: 20px; }
+  .dropped ul { margin: 6px 0 0; padding-left: 18px; }
+
+  .bankroll { display: flex; justify-content: space-around; background: var(--card); border: 1px solid var(--card-border);
+              border-radius: 16px; padding: 20px; margin-top: 32px; flex-wrap: wrap; gap: 12px;}
+  .bankroll .num { font-size: 20px; font-weight: 700; font-family: "SF Mono", "Roboto Mono", monospace; }
+  .bankroll .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .bankroll .col { text-align: center; }
+
+  .footer-note { text-align: center; color: var(--muted); font-size: 12px; margin-top: 40px; }
+  a { color: var(--accent); }
+  a:hover { color: var(--fg); }
+
+  @media (max-width: 480px) {
+    .header .date { font-size: 28px; }
+    .header h1 { font-size: 18px; }
+    .play, .parlay { padding: 20px; }
+    .metrics { gap: 14px 22px; }
+    .stake { padding: 7px 14px; }
+    .bankroll { padding: 16px; gap: 14px 8px; }
+    .bankroll .num { font-size: 17px; }
+  }
+</style>
+</head>
+<body>
+<div class="sample-banner">This is a SAMPLE with fake data, showing the report format. Run <code>python run_daily.py</code> to generate a real one at data_store/reports/.</div>
+<div class="wrap">
+
+  <div class="header">
+    <h1>Daily Betting Report</h1>
+    <p class="date">2026-07-08</p>
+    <p class="updated"><span class="dot"></span>Updated Jul 8, 2026 - 4:58 PM ET</p>
+    <div class="strip">
+      <div class="item">Slate: <b>12 games</b></div>
+      <div class="item">Moon: <b>Waning Gibbous</b> in <b>Sagittarius</b></div>
+      <div class="item">Numerology: <b>7</b></div>
+    </div>
+  </div>
+
+  <div class="warnbox">
+    <b>Data quality warnings</b>
+    <ul>
+      <li>Tampa Bay @ Boston: public betting % is not yet filled in -- edit manual_inputs/public_betting_2026-07-08.json for a sharper read.</li>
+    </ul>
+  </div>
+
+  <div class="play">
+    <div class="label">Play #1</div>
+    <div class="team">New York Yankees ML <span class="odds">(-142)</span></div>
+    <div class="metrics">
+      <div class="metric"><div class="num">7.8%</div><div class="lbl">Edge</div></div>
+      <div class="metric"><div class="num">62.4%</div><div class="lbl">Model win%</div></div>
+      <div class="metric"><div class="num">54.6%</div><div class="lbl">Market win%</div></div>
+    </div>
+    <div class="stake">1u &middot; $100.00</div>
+    <div class="flags">
+      <span class="flag">Line moved 12 cents against the play (open -130 -&gt; now -142) but not confirmed by heavy money -- kept, watch closely.</span>
+    </div>
+    <div class="why">
+      <div class="why-title">Why this clears every layer:</div>
+      <ul>
+        <li>Pythagorean win%: home 0.583 vs away 0.489 (home the deeper team)</li>
+        <li>Starter FIP: Gerrit Cole 2.98 vs Tanner Houck 4.15 -&gt; edge to home starter</li>
+        <li>hard-hit% allowed: home SP 33.1 vs away SP 41.8; team wOBA: home 0.334 vs away 0.309</li>
+        <li>games back: home 1.0 vs away 6.5; streak: home +4 vs away -2</li>
+        <li>Tickets 58% home / Handle 74% home -&gt; sharp money on home</li>
+        <li>park run factor 106; rest: home 1d, away 3d</li>
+        <li>Waning Gibbous (61% illuminated), Moon in Sagittarius (fire sign) -&gt; favorite lean</li>
+        <li>Date reduces to 7 -&gt; favorite lean</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="section-title">Optional Parlay</div>
+  <div class="parlay">
+    <div class="legs">New York Yankees + Los Angeles Dodgers ML</div>
+    <div class="odds">Combined: +142 &middot; 41.2% win probability</div>
+    <div class="note">Moon/numerology green light today (combined energy 0.38 &ge; 0.35) -- every leg already clears MIN_EDGE on its own; this parlay is a bonus, not a substitute for the straight plays.</div>
+  </div>
+
+  <div class="section-title">HR Props</div>
+  <div class="prop-card">
+    <div>
+      <div class="name">Aaron Judge <span style="color:var(--muted); font-weight:400;">(NYY)</span></div>
+      <div class="meta">vs Shane Bieber &middot; Aaron Judge: strong barrel rate (16.2%); Shane Bieber allows a high barrel rate (10.1%); Park HR factor 114 boosts homer probability.</div>
+    </div>
+    <div class="score">84</div>
+  </div>
+
+  <div class="section-title">Considered &amp; Dropped</div>
+  <div class="dropped">
+    <ul>
+      <li>Atlanta Braves: skipped -- played recently and didn't clear the stricter re-confirmation bar.</li>
+      <li>Seattle Mariners: Line moved 22 cents against the play AND 71% of handle is on the other side -- dropped (smart money confirmed).</li>
+    </ul>
+  </div>
+
+  <div class="bankroll">
+    <div class="col"><div class="num">14-9</div><div class="lbl">Record</div></div>
+    <div class="col"><div class="num">+4.35</div><div class="lbl">Units</div></div>
+    <div class="col"><div class="num">+435.00</div><div class="lbl">Net $</div></div>
+    <div class="col"><div class="num">$2,435.00</div><div class="lbl">Bankroll</div></div>
+  </div>
+
+  <div class="footer-note">Generated by your MLB Betting Recommendation Engine &middot; flat 1.0u sizing &middot; 5% min edge &middot; for your own records, not financial advice</div>
+</div>
+</body>
+</html>
