@@ -37,6 +37,8 @@
   .header { text-align: center; margin-bottom: 32px; }
   .header h1 { font-size: 22px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; font-weight: 600; }
   .header .date { font-size: 34px; font-weight: 700; margin: 0; }
+  .header .updated { font-size: 12px; color: var(--muted); margin: 10px 0 0; display: inline-flex; align-items: center; gap: 6px; }
+  .header .updated .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); display: inline-block; flex-shrink: 0; }
   .strip { display: flex; justify-content: center; gap: 24px; margin-top: 16px; flex-wrap: wrap; }
   .strip .item { font-size: 13px; color: var(--muted); }
   .strip .item b { color: var(--fg); }
@@ -114,6 +116,7 @@
   <div class="header">
     <h1>Daily Betting Report</h1>
     <p class="date">2026-07-09</p>
+    <p class="updated"><span class="dot"></span>Updated Jul 9, 2026 - 4:13 PM EDT</p>
     <div class="strip">
       <div class="item">Slate: <b>13 games</b></div>
       <div class="item">Moon: <b>Waning Crescent</b> in <b>Taurus</b></div>
