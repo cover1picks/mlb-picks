@@ -26,7 +26,7 @@ jobs:
       - name: Run today's pipeline (auto-gated on schedule; always forced on manual "Run workflow")
         env:
           STATS_MODE: api
-          ODDS_MODE: mock
+          ODDS_MODE: api
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           PUBLIC_BETTING_MODE: manual
           PUBLIC_BETTING_URL: ""
