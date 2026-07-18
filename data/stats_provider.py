@@ -289,7 +289,7 @@ def _mlb_stats_api_pitcher_season(player_id):
     FanGraphs scrape below for FIP/barrel only."""
     try:
         url = f"{MLB_STATS_API}/people/{player_id}/stats"
-      resp = requests.get(url, params={"stats": "season", "group": "pitching", "season": _season()}, timeout=15)
+        resp = requests.get(url, params={"stats": "season", "group": "pitching", "season": _season()}, timeout=15)
         resp.raise_for_status()
         payload = resp.json()
         splits = payload.get("stats", [{}])[0].get("splits", [])
