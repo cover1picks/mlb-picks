@@ -119,6 +119,15 @@ def main(argv=None):
     for game in games:
         db.upsert_game(game)
 
+    missing_pitchers = [g for g in games if g.sport == "MLB" and (not g.home_pitcher or not g.away_pitcher)]
+    if missing_pitchers:
+        data_warnings.append(
+            f"{len(missing_pitchers)} MLB game(s) have no probable pitcher posted by MLB yet -- "
+            f"pitching-matchup grading and HR props are skipped for those until confirmed: "
+            + ", ".join(f"{g.away_team}@{g.home_team}" for g in missing_pitchers[:6])
+            + (f" +{len(missing_pitchers) - 6} more" if len(missing_pitchers) > 6 else "")
+        )
+
     odds_by_game = {}
     for sport in config.ENABLED_SPORTS:
         sport_games = [g for g in games if g.sport == sport]
