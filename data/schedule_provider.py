@@ -16,6 +16,14 @@ logger = logging.getLogger(__name__)
 
 MLB_STATS_API = "https://statsapi.mlb.com/api/v1/schedule"
 
+# gameType codes: R=regular season, F/D/L/W=postseason rounds -- these are
+# real, bettable MLB games. Excluded: A=All-Star Game, S=Spring Training,
+# E=Exhibition -- these come back from this same endpoint but aren't normal
+# markets (rosters are all-star squads or split-squad, not real team lines),
+# so they must never reach the odds/scoring pipeline as if they were a
+# normal slate.
+REAL_GAME_TYPES = {"R", "F", "D", "L", "W"}
+
 
 def get_todays_games(date_str):
     """date_str: 'YYYY-MM-DD'. Returns a list of engine.models.Game.
@@ -36,12 +44,19 @@ def get_todays_games(date_str):
         return []
 
     games = []
+    skipped_non_bettable = 0
     for date_block in payload.get("dates", []):
         for g in date_block.get("games", []):
+            if g.get("gameType") not in REAL_GAME_TYPES:
+                skipped_non_bettable += 1
+                continue
             try:
                 games.append(_parse_game(g, date_str))
             except Exception as exc:
                 logger.warning("Skipping one game we couldn't parse: %s", exc)
+    if skipped_non_bettable:
+        logger.info("Excluded %d non-bettable MLB game(s) today (All-Star/Spring Training/Exhibition).",
+                    skipped_non_bettable)
     return games
 
 

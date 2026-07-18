@@ -71,7 +71,6 @@ class Recommendation:
     team: str
     sport: str
     odds_american: int
-    odds_source: str = "mock"   # MoneylineOdds.book -- "fanduel" (real) | "mock" (simulated fallback)
     edge_pct: float
     model_prob: float
     market_prob: float
@@ -79,6 +78,7 @@ class Recommendation:
     stake_dollars: float
     reasoning: List[str]
     factor_scores: List[FactorScore]
+    odds_source: str = "mock"   # MoneylineOdds.book -- "fanduel" (real) | "mock" (simulated fallback)
     diversification_flag: Optional[str] = None
     line_movement_flag: Optional[str] = None
 
