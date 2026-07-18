@@ -1,238 +1,369 @@
-#!/usr/bin/env python3
 """
-run_daily.py
-=============
-The one command you run each day:
+data/stats_provider.py
+=======================
+Advanced pitching/batting metrics via pybaseball (free, wraps FanGraphs +
+Baseball Savant). This is the most fragile external dependency in the
+project -- pybaseball scrapes public leaderboards that occasionally change
+shape, and Statcast pulls are slow. Every call in this file is wrapped so a
+single failed lookup degrades that ONE factor (data_quality="degraded")
+instead of killing the whole daily run.
 
-    python run_daily.py
+Results are cached in SQLite (stats_cache table) for CACHE_TTL_HOURS so you
+don't re-scrape the same season leaderboard every time you run the tool.
 
-What it does, in order:
-  1. Grades yesterday's pending recommendations (backtest/grader.py).
-  2. Pulls today's MLB slate, odds, public splits, advanced stats, standings,
-     situational context, moon phase/zodiac, and numerology.
-  3. Scores every game through every grading factor (engine/grading_factors.py)
-     into one edge % per game (engine/scoring.py).
-  4. Applies the non-negotiable rules -- min edge, flat sizing, second-play,
-     diversification, line movement (engine/strategy_rules.py).
-  5. Runs the HR prop workflow (engine/hr_props.py) automatically.
-  6. Maybe builds a bonus parlay (engine/parlay.py).
-  7. Prints the terminal report and writes the HTML report.
-  8. Logs everything to SQLite for tomorrow's grading + P&L tracking.
-
-Flags:
-  --date YYYY-MM-DD   run as if it were this date (backtesting / testing)
-  --skip-grading      don't grade yesterday's picks first
-  --auto              scheduled/unattended mode -- only publish once, timed
-                      to ~1 hour before today's first pitch instead of
-                      running immediately (see auto_gate.py). This is what
-                      .github/workflows/daily.yml calls; a plain manual run
-                      never needs it.
+If pybaseball changes a function name/column on you, this is the only file
+you should need to touch.
 """
 
-import argparse
 import logging
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+import time
+from dataclasses import dataclass, asdict
 
-import auto_gate
+import pandas as pd
+import requests
+
 import config
-from data.db import Database
-from data.schedule_provider import get_todays_games
-from data.schedule_provider_wnba import get_todays_wnba_games
-from data.odds_providers import get_odds_provider
-from data.public_betting_provider import get_public_betting_provider
-from data.stats_provider import get_stats_provider
-from data.situational import park_and_situational_summary, ensure_injury_template, team_situational_summary
-from data.standings import get_all_team_records
-from data.rosters import get_team_batters
-from data.celestial import celestial_signal_for, moon_phase_for, moon_sign_for
-from data.numerology import numerology_signal_for, reduce_date
+from data.http_utils import patch_requests_for_scraping
 
-from engine.scoring import evaluate_game
-from engine.strategy_rules import select_daily_plays, select_fade_teams, get_parlay_pool
-from engine.hr_props import evaluate_hr_prop_candidates
-from engine.parlay import maybe_build_parlay
-from engine.models import DailyReport
+logger = logging.getLogger(__name__)
 
-from output.terminal_report import print_daily_report
-from output.html_report import render_daily_report
-from output.history_log import log_recommendations, bankroll_summary
-from output.publish_github_pages import publish_latest_report
+CACHE_TTL_HOURS = 12
+MLB_STATS_API = "https://statsapi.mlb.com/api/v1"
 
-from backtest.grader import grade_pending
-
-logging.basicConfig(level=getattr(logging, config.LOG_LEVEL, logging.INFO),
-                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("run_daily")
+patch_requests_for_scraping()
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run today's betting recommendation pipeline.")
-    parser.add_argument("--date", default=None, help="Run as if it were this date (YYYY-MM-DD).")
-    parser.add_argument("--skip-grading", action="store_true", help="Skip grading yesterday's picks first.")
-    parser.add_argument("--auto", action="store_true",
-                         help="Scheduled mode: only publish once, ~1 hour before first pitch.")
-    args = parser.parse_args(argv)
+@dataclass
+class PitcherProfile:
+    name: str
+    era: float = None          # from MLB's own Stats API (official, reliable) -- the PRIMARY matchup metric now
+    fip: float = None          # from pybaseball/FanGraphs -- best-effort bonus, often unavailable, never blocks grading
+    k_pct: float = None
+    bb_pct: float = None
+    barrel_pct_allowed: float = None
+    hard_hit_pct_allowed: float = None
+    hr_per_9: float = None
+    data_quality: str = "ok"
 
-    run_date = (datetime.strptime(args.date, "%Y-%m-%d").date() if args.date
-                else datetime.now(ZoneInfo(config.TIMEZONE)).date())  # "today" in config.TIMEZONE,
-                # not the machine's local date -- matters on a UTC cloud runner (see auto_gate.py)
-    date_str = run_date.strftime("%Y-%m-%d")
 
-    games = []
-    for sport in config.ENABLED_SPORTS:
-        if sport == "MLB":
-            games.extend(get_todays_games(date_str))
-        elif sport == "WNBA":
-            games.extend(get_todays_wnba_games(date_str))
+@dataclass
+class TeamOffenseProfile:
+    team: str
+    barrel_pct: float = None
+    hard_hit_pct: float = None
+    woba: float = None
+    data_quality: str = "ok"
 
-    if args.auto:
-        should_run, reason = auto_gate.should_run_now(run_date, date_str, games)
-        logger.info("Auto-run check: %s", reason)
-        if not should_run:
-            return
 
-    db = Database()
+@dataclass
+class BatterProfile:
+    name: str
+    team: str = None
+    barrel_pct: float = None
+    hard_hit_pct: float = None
+    iso: float = None
+    hr_count: int = None
+    recent_barrel_trend: float = None  # last-15-day barrel% minus season barrel%
+    data_quality: str = "ok"
 
-    if not args.skip_grading:
-        result = grade_pending(db)
-        if result.get("graded"):
-            logger.info("Graded %s pending recommendation(s) from prior days.", result["graded"])
 
-    data_warnings = []
+class _StatsCache:
+    """Tiny key/value cache table living in the same SQLite file as
+    everything else, so repeated runs in one day don't re-hit
+    pybaseball/Savant."""
 
-    if not games:
-        logger.info("No games found across enabled sports (%s) for %s.", ", ".join(config.ENABLED_SPORTS), date_str)
-        report = DailyReport(date=date_str, slate_size=0, plays=[], fade_teams=[], hr_props=[], parlay=None,
-                              dropped_notes=[], celestial=_celestial_dict(run_date),
-                              numerology=_numerology_dict(run_date),
-                              bankroll_summary=bankroll_summary(db),
-                              data_warnings=["No games on today's schedule across enabled sports."])
-        _emit(report)
-        if args.auto:
-            auto_gate.mark_published(date_str)
-        return
-
-    if len(games) < config.MIN_SLATE_SIZE:
-        data_warnings.append(f"Small slate today ({len(games)} games) -- confidence in every edge is lower.")
-
-    for game in games:
-        db.upsert_game(game)
-
-    missing_pitchers = [g for g in games if g.sport == "MLB" and (not g.home_pitcher or not g.away_pitcher)]
-    if missing_pitchers:
-        data_warnings.append(
-            f"{len(missing_pitchers)} MLB game(s) have no probable pitcher posted by MLB yet -- "
-            f"pitching-matchup grading and HR props are skipped for those until confirmed: "
-            + ", ".join(f"{g.away_team}@{g.home_team}" for g in missing_pitchers[:6])
-            + (f" +{len(missing_pitchers) - 6} more" if len(missing_pitchers) > 6 else "")
+    def __init__(self, db_path=None):
+        import sqlite3
+        self.conn = sqlite3.connect(str(db_path or config.DB_PATH))
+        self.conn.execute(
+            """CREATE TABLE IF NOT EXISTS stats_cache (
+                   key TEXT PRIMARY KEY, payload TEXT NOT NULL, cached_at REAL NOT NULL
+               )"""
         )
+        self.conn.commit()
 
-    odds_by_game = {}
-    for sport in config.ENABLED_SPORTS:
-        sport_games = [g for g in games if g.sport == sport]
-        if not sport_games:
-            continue
-        odds_by_game.update(get_odds_provider(sport).get_odds(sport_games))
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for game in games:
-        odds = odds_by_game.get(game.game_id)
-        if not odds:
-            continue
-        is_opening = db.get_opening_line(game.game_id) is None
-        db.record_odds_snapshot(game.game_id, odds, now_iso, is_opening=is_opening)
+    def get(self, key):
+        import json
+        row = self.conn.execute(
+            "SELECT payload, cached_at FROM stats_cache WHERE key=?", (key,)
+        ).fetchone()
+        if not row:
+            return None
+        payload, cached_at = row
+        if time.time() - cached_at > CACHE_TTL_HOURS * 3600:
+            return None
+        try:
+            return json.loads(payload)
+        except Exception:
+            return None
 
-    ensure_injury_template(date_str)
-    public_splits = get_public_betting_provider().get_splits(games, date_str)
-    for game in games:
-        split = public_splits.get(game.game_id)
-        if not split:
-            continue
-        db.record_public_split(game.game_id, split, now_iso)
-        if split.data_quality in ("missing", "mock"):
-            data_warnings.append(
-                f"{game.away_team} @ {game.home_team}: public betting % is "
-                f"{'simulated' if split.data_quality == 'mock' else 'not yet filled in'} -- "
-                f"edit manual_inputs/public_betting_{date_str}.json for a sharper read."
-            )
-
-    stats_provider = get_stats_provider()
-    team_records = get_all_team_records()
-    if not team_records:
-        data_warnings.append("Standings unavailable today -- talent gap & motivation factors are running blind.")
-
-    evaluations = []
-    for game in games:
-        odds = odds_by_game.get(game.game_id)
-        if not odds:
-            continue
-        is_mlb = game.sport == "MLB"
-        home_pitcher_profile = (stats_provider.get_pitcher_profile(game.home_pitcher.name, game.home_pitcher.player_id)
-                                 if is_mlb and game.home_pitcher else None)
-        away_pitcher_profile = (stats_provider.get_pitcher_profile(game.away_pitcher.name, game.away_pitcher.player_id)
-                                 if is_mlb and game.away_pitcher else None)
-        home_offense = stats_provider.get_team_offense_profile(game.home_team) if is_mlb else None
-        away_offense = stats_provider.get_team_offense_profile(game.away_team) if is_mlb else None
-        situational = (park_and_situational_summary(game.home_team, game.away_team, date_str)
-                       if is_mlb else {})
-        ev = evaluate_game(
-            game, odds, home_pitcher_profile, away_pitcher_profile, home_offense, away_offense,
-            team_records.get(game.home_team, {}) if is_mlb else {},
-            team_records.get(game.away_team, {}) if is_mlb else {},
-            public_splits.get(game.game_id), situational, run_date=run_date,
+    def set(self, key, value):
+        import json
+        self.conn.execute(
+            "INSERT OR REPLACE INTO stats_cache (key, payload, cached_at) VALUES (?, ?, ?)",
+            (key, json.dumps(value), time.time()),
         )
-        evaluations.append(ev)
-
-    plays, dropped_notes = select_daily_plays(evaluations, db, public_splits, date_str)
-    fade_teams = select_fade_teams(evaluations)
-
-    rosters = {}
-    situational_by_team = {}
-    for game in games:
-        for team in (game.home_team, game.away_team):
-            if team not in rosters:
-                rosters[team] = get_team_batters(team)
-                situational_by_team[team] = team_situational_summary(team, date_str)
-
-    hr_props = []
-    if config.HR_PROPS_ENABLED:
-        hr_props = evaluate_hr_prop_candidates(games, rosters, stats_provider, {}, situational_by_team)
-
-    raw_celestial, _, _ = celestial_signal_for(run_date)
-    raw_numerology, _, _ = numerology_signal_for(run_date)
-    parlay_pool = get_parlay_pool(evaluations)
-    parlay = maybe_build_parlay(parlay_pool, raw_celestial, raw_numerology)
-
-    log_recommendations(db, date_str, plays, hr_props)
-
-    report = DailyReport(
-        date=date_str, slate_size=len(games), plays=plays, fade_teams=fade_teams, hr_props=hr_props, parlay=parlay,
-        dropped_notes=dropped_notes, celestial=_celestial_dict(run_date),
-        numerology=_numerology_dict(run_date), bankroll_summary=bankroll_summary(db),
-        data_warnings=data_warnings,
-    )
-    _emit(report)
-    if args.auto:
-        auto_gate.mark_published(date_str)
+        self.conn.commit()
 
 
-def _celestial_dict(run_date):
-    phase, illum = moon_phase_for(run_date)
-    return {"phase": phase, "illumination": illum, "sign": moon_sign_for(run_date)}
+class StatsProvider:
+    def get_pitcher_profile(self, pitcher_name, player_id=None):
+        raise NotImplementedError
+
+    def get_team_offense_profile(self, team_abbr):
+        raise NotImplementedError
+
+    def get_batter_profile(self, batter_name, team_abbr=None):
+        raise NotImplementedError
 
 
-def _numerology_dict(run_date):
-    return {"number": reduce_date(run_date)}
+class PyBaseballStatsProvider(StatsProvider):
+    def __init__(self):
+        self.cache = _StatsCache()
+        self._pitching_table = None
+        self._batting_table = None
+        self._pitcher_barrel_table = None   # season-long Statcast LEADERBOARD (one fast call), not per-player pulls
+        self._batter_barrel_table = None
+
+    # -- pitchers -------------------------------------------------------
+    def get_pitcher_profile(self, pitcher_name, player_id=None):
+        """player_id (MLB Stats API person id) is optional but strongly
+        preferred -- run_daily.py already has it from the probable-pitcher
+        hydrate, and MLB's own stats endpoint (official, JSON, no scraping)
+        is what actually populates ERA/HR-9 reliably. FIP layers on top from
+        pybaseball/FanGraphs on a best-effort basis only -- if that scrape
+        is degraded, ERA alone is enough for matchup grading to work."""
+        if not pitcher_name or pitcher_name == "TBD":
+            return PitcherProfile(name=pitcher_name or "TBD", data_quality="missing")
+
+        cache_key = f"pitcher:{pitcher_name}:{_season()}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return PitcherProfile(**cached)
+
+        profile = PitcherProfile(name=pitcher_name, data_quality="not_found")
+
+        if player_id:
+            mlb_stats = _mlb_stats_api_pitcher_season(player_id)
+            if mlb_stats:
+                profile.era = mlb_stats.get("era")
+                profile.hr_per_9 = mlb_stats.get("hr_per_9")
+                profile.k_pct = mlb_stats.get("k_pct")
+                profile.bb_pct = mlb_stats.get("bb_pct")
+                profile.data_quality = "ok"
+
+        try:
+            row = self._lookup_pitcher_row(pitcher_name)
+            if row is not None:
+                profile.fip = _safe_float(row.get("FIP"))
+                if profile.era is None:
+                    profile.era = _safe_float(row.get("ERA"))
+                if profile.hr_per_9 is None:
+                    profile.hr_per_9 = _safe_float(row.get("HR/9"))
+                if profile.data_quality == "not_found":
+                    profile.data_quality = "ok"
+            barrel, hard_hit = self._statcast_barrel_hard_hit_allowed(pitcher_name)
+            profile.barrel_pct_allowed = barrel
+            profile.hard_hit_pct_allowed = hard_hit
+        except Exception as exc:
+            logger.debug("FanGraphs/Statcast bonus lookup failed for %s (ERA-based grading still works): %s",
+                         pitcher_name, exc)
+
+        if profile.era is None and profile.fip is None:
+            profile.data_quality = "not_found"
+
+        self.cache.set(cache_key, asdict(profile))
+        return profile
+
+    def _lookup_pitcher_row(self, pitcher_name):
+        import pybaseball as pyb  # imported lazily so a broken pybaseball
+        # install doesn't block the whole program from starting.
+
+        if self._pitching_table is None:
+            pyb.cache.enable()
+            season = _season()
+            self._pitching_table = pyb.pitching_stats(season, season, qual=0)
+        table = self._pitching_table
+        matches = table[table["Name"].str.lower() == pitcher_name.lower()]
+        if matches.empty:
+            last = pitcher_name.split()[-1].lower()
+            matches = table[table["Name"].str.lower().str.contains(last, na=False)]
+        if matches.empty:
+            return None
+        return matches.iloc[0].to_dict()
+
+    def _statcast_barrel_hard_hit_allowed(self, pitcher_name):
+        """Barrel%/hard-hit% allowed, from Baseball Savant's precomputed
+        season leaderboard (one bulk call, cached) instead of pulling every
+        pitch the pitcher threw all season (statcast_pitcher) -- that raw
+        per-player pull is what was silently timing out/erroring for most
+        pitchers. Returns (None, None) on any failure -- callers treat that
+        as 'unavailable', not fatal."""
+        try:
+            import pybaseball as pyb
+
+            if self._pitcher_barrel_table is None:
+                self._pitcher_barrel_table = pyb.statcast_pitcher_exitvelo_barrels(_season(), minBBE=0)
+            table = self._pitcher_barrel_table
+            if table is None or table.empty:
+                return None, None
+
+            row = _match_savant_name(table, pitcher_name)
+            if row is None:
+                return None, None
+            barrel = _safe_float(row.get("brl_percent"))
+            hard_hit = _safe_float(row.get("ev95percent"))
+            return barrel, hard_hit
+        except Exception as exc:
+            logger.debug("statcast pitcher leaderboard lookup failed for %s: %s", pitcher_name, exc)
+            return None, None
+
+    # -- team offense -----------------------------------------------------
+    def get_team_offense_profile(self, team_abbr):
+        cache_key = f"team_offense:{team_abbr}:{_season()}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return TeamOffenseProfile(**cached)
+        try:
+            import pybaseball as pyb
+
+            season = _season()
+            table = pyb.team_batting(season, season)
+            row = table[table["Team"].str.contains(team_abbr, case=False, na=False)]
+            if row.empty:
+                profile = TeamOffenseProfile(team=team_abbr, data_quality="not_found")
+            else:
+                r = row.iloc[0].to_dict()
+                profile = TeamOffenseProfile(
+                    team=team_abbr, woba=_safe_float(r.get("wOBA")),
+                    data_quality="partial",  # FanGraphs team_batting doesn't include barrel/hard-hit directly
+                )
+        except Exception as exc:
+            logger.warning("team offense lookup failed for %s: %s", team_abbr, exc)
+            profile = TeamOffenseProfile(team=team_abbr, data_quality="degraded")
+        self.cache.set(cache_key, asdict(profile))
+        return profile
+
+    # -- batters (used by HR prop workflow) --------------------------------
+    def get_batter_profile(self, batter_name, team_abbr=None):
+        cache_key = f"batter:{batter_name}:{_season()}"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return BatterProfile(**cached)
+        try:
+            import pybaseball as pyb
+
+            if self._batter_barrel_table is None:
+                self._batter_barrel_table = pyb.statcast_batter_exitvelo_barrels(_season(), minBBE=0)
+            table = self._batter_barrel_table
+            if table is None or table.empty:
+                profile = BatterProfile(name=batter_name, team=team_abbr, data_quality="degraded")
+            else:
+                row = _match_savant_name(table, batter_name)
+                if row is None:
+                    profile = BatterProfile(name=batter_name, team=team_abbr, data_quality="not_found")
+                else:
+                    barrel = _safe_float(row.get("brl_percent"))
+                    hard_hit = _safe_float(row.get("ev95percent"))
+                    profile = BatterProfile(
+                        name=batter_name, team=team_abbr, barrel_pct=barrel, hard_hit_pct=hard_hit,
+                        data_quality="ok" if barrel is not None else "partial",
+                    )
+        except Exception as exc:
+            logger.warning("batter profile lookup failed for %s: %s", batter_name, exc)
+            profile = BatterProfile(name=batter_name, team=team_abbr, data_quality="degraded")
+        self.cache.set(cache_key, asdict(profile))
+        return profile
 
 
-def _emit(report):
-    print_daily_report(report)
-    path, html = render_daily_report(report)
-    logger.info("HTML report written to %s", path)
-    publish_result = publish_latest_report(html)
-    if publish_result.get("published"):
-        logger.info("Live at %s", publish_result["url"])
+def _season():
+    from datetime import datetime
+    return datetime.now().year
 
 
-if __name__ == "__main__":
-    main()
+def _mlb_stats_api_pitcher_season(player_id):
+    """ERA/HR-9/K%/BB% straight from MLB's own Stats API, keyed by the exact
+    player_id the schedule fetch already gave us -- official source, JSON,
+    no scraping/blocking/name-matching involved. Returns None on any failure
+    (network hiccup, rookie with no games yet) -- caller falls back to the
+    FanGraphs scrape below for FIP/barrel only."""
+    try:
+        url = f"{MLB_STATS_API}/people/{player_id}/stats"
+        resp = requests.get(url, params={"stats": "season", "group": "pitching"}, timeout=15)
+        resp.raise_for_status()
+        payload = resp.json()
+        splits = payload.get("stats", [{}])[0].get("splits", [])
+        if not splits:
+            return None
+        s = splits[0]["stat"]
+        ip = _safe_float(s.get("inningsPitched"))
+        hr = _safe_float(s.get("homeRuns"))
+        bf = _safe_float(s.get("battersFaced"))
+        so = _safe_float(s.get("strikeOuts"))
+        bb = _safe_float(s.get("baseOnBalls"))
+        return {
+            "era": _safe_float(s.get("era")),
+            "hr_per_9": round(hr * 9 / ip, 2) if hr is not None and ip else None,
+            "k_pct": round(100 * so / bf, 1) if so is not None and bf else None,
+            "bb_pct": round(100 * bb / bf, 1) if bb is not None and bf else None,
+        }
+    except Exception as exc:
+        logger.debug("MLB Stats API pitcher lookup failed for player_id=%s: %s", player_id, exc)
+        return None
+
+
+def _match_savant_name(table, full_name):
+    """Baseball Savant leaderboard tables key players by 'Last, First' in a
+    'last_name, first_name' column -- convert our 'First Last' and match,
+    falling back to a last-name-only contains match for suffixes/accents."""
+    if "last_name, first_name" not in table.columns:
+        return None
+    first, last = _split_name(full_name)
+    target = f"{last}, {first}".strip().lower()
+    col = table["last_name, first_name"].astype(str).str.lower()
+    exact = table[col == target]
+    if not exact.empty:
+        return exact.iloc[0].to_dict()
+    contains = table[col.str.contains(last.lower(), na=False)]
+    if not contains.empty:
+        return contains.iloc[0].to_dict()
+    return None
+
+
+def _safe_float(v):
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _split_name(full_name):
+    parts = full_name.strip().split()
+    if len(parts) < 2:
+        return full_name, ""
+    return parts[0], " ".join(parts[1:])
+
+
+class _MockStatsProvider(StatsProvider):
+    """Neutral placeholder stats so the pipeline runs with STATS_MODE=mock --
+    useful for a quick, network-free smoke test of the whole pipeline."""
+
+    def get_pitcher_profile(self, pitcher_name, player_id=None):
+        return PitcherProfile(name=pitcher_name or "TBD", fip=4.20, era=4.20, k_pct=22.0,
+                               bb_pct=8.0, barrel_pct_allowed=7.5, hard_hit_pct_allowed=38.0,
+                               hr_per_9=1.3, data_quality="mock")
+
+    def get_team_offense_profile(self, team_abbr):
+        return TeamOffenseProfile(team=team_abbr, barrel_pct=7.5, hard_hit_pct=38.0, woba=0.315, data_quality="mock")
+
+    def get_batter_profile(self, batter_name, team_abbr=None):
+        return BatterProfile(name=batter_name, team=team_abbr, barrel_pct=7.5, hard_hit_pct=38.0,
+                              iso=0.16, hr_count=10, recent_barrel_trend=0.0, data_quality="mock")
+
+
+def get_stats_provider():
+    if config.STATS_MODE == "api":
+        return PyBaseballStatsProvider()
+    return _MockStatsProvider()
