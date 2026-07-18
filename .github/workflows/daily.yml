@@ -52,15 +52,11 @@ jobs:
           git add -f index.html 2>/dev/null || true
           git add -f data_store/betting_engine.db 2>/dev/null || true
           git add -f data_store/last_published.txt 2>/dev/null || true
+          git add -f manual_inputs/*.json 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "Nothing new to publish this check."
           else
             git commit -m "Automated daily update ($(date -u +'%Y-%m-%d %H:%M UTC'))"
             git pull --rebase origin "${GITHUB_REF_NAME}" || true
             git push
-          git add -f index.html 2>/dev/null || true
-          git add -f data_store/betting_engine.db 2>/dev/null || true
-          git add -f data_store/last_published.txt 2>/dev/null || true
-          git add -f manual_inputs/*.json 2>/dev/null || true
-          if git diff --cached --quiet; then
-
+          fi
