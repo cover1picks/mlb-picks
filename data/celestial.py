@@ -41,16 +41,24 @@ from datetime import datetime, timezone
 SYNODIC_MONTH = 29.53058867
 REFERENCE_NEW_MOON = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
 
-MOON_PHASE_BOUNDARIES = [
-    (0.0625, "New Moon"),
-    (0.1875, "Waxing Crescent"),
-    (0.3125, "First Quarter"),
-    (0.4375, "Waxing Gibbous"),
-    (0.5625, "Full Moon"),
-    (0.6875, "Waning Gibbous"),
-    (0.8125, "Last Quarter"),
-    (0.9375, "Waning Crescent"),
-    (1.0001, "New Moon"),
+# Phase name by phase ANGLE (0deg = New, 90 = First Quarter, 180 = Full,
+# 270 = Last Quarter). The four PRINCIPAL phases only get a narrow +/-12deg
+# window (~1 day) around their exact instant; everything else is a
+# crescent/gibbous. An earlier version gave the principal phases a huge
+# +-0.0625-of-cycle (~1.85 day) band, which mislabeled e.g. an 8.5-day-old
+# 62%-illuminated Moon (clearly Waxing Gibbous) as "First Quarter". This
+# matches moongiant / theskylive / astro-seek day labels.
+PRINCIPAL_HALF_WINDOW = 12.0   # degrees on each side of 0/90/180/270
+MOON_PHASE_ANGLE_BANDS = [
+    (12.0,  "New Moon"),          # 348..360 wraps to here too (handled in code)
+    (78.0,  "Waxing Crescent"),
+    (102.0, "First Quarter"),
+    (168.0, "Waxing Gibbous"),
+    (192.0, "Full Moon"),
+    (258.0, "Waning Gibbous"),
+    (282.0, "Last Quarter"),
+    (348.0, "Waning Crescent"),
+    (360.0, "New Moon"),
 ]
 
 # EDIT ME: your real read on how each phase should lean.
@@ -94,10 +102,11 @@ def moon_phase_for(d):
     """Returns (phase_name, illumination_fraction 0..1) for date `d`."""
     dt = datetime(d.year, d.month, d.day, 12, 0, tzinfo=timezone.utc)
     days_since = (dt - REFERENCE_NEW_MOON).total_seconds() / 86400.0
-    phase_frac = (days_since % SYNODIC_MONTH) / SYNODIC_MONTH  # 0..1
+    phase_frac = (days_since % SYNODIC_MONTH) / SYNODIC_MONTH  # 0..1 (0 = new, 0.5 = full)
     illumination = (1 - math.cos(2 * math.pi * phase_frac)) / 2
-    for boundary, name in MOON_PHASE_BOUNDARIES:
-        if phase_frac < boundary:
+    angle = phase_frac * 360.0
+    for upper, name in MOON_PHASE_ANGLE_BANDS:
+        if angle < upper:
             return name, round(illumination, 3)
     return "New Moon", round(illumination, 3)
 
