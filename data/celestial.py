@@ -2,7 +2,7 @@
 data/celestial.py
 ==================
 Pure-math moon phase + MOON SIGN for a given date. No API needed -- both are
-computed directly from a real lunar-position formula, so there's nothing to
+computed directly from real Sun/Moon position formulas, so there's nothing to
 scrape and nothing that can go stale.
 
 IMPORTANT: "zodiac" here means the sign the MOON is currently transiting
@@ -10,29 +10,21 @@ IMPORTANT: "zodiac" here means the sign the MOON is currently transiting
 NOT your sun/birth sign. The Moon changes sign every ~2.25 days as it moves
 around the whole zodiac in ~27.3 days -- it is NOT the same as the calendar
 sun-sign date ranges (Jun 21-Jul 22 = Cancer, etc.) that a birthday horoscope
-uses. An earlier version of this file made exactly that mistake (bucketing
-by calendar date -> sun sign). Fixed by computing the Moon's real ecliptic
-longitude and reading the sign off of that, same underlying astronomy any
-moon-sign calendar uses.
+uses.
 
-The math: `_moon_ecliptic_longitude` is the Meeus "Astronomical Algorithms"
-low-precision lunar theory (truncated ELP2000 series) -- a standard, public
-formula, accurate to a fraction of a degree. That's precise enough to place
-the Moon in the correct 30-degree zodiac slice except within roughly an hour
-of an exact sign change, same edge case any source has right at an ingress
-moment. Verified against mooncalendar.astro-seek.com for the date this fix
-shipped (Moon in Taurus, Jul 9 2026) and several days around it.
+Both the phase and the sign are computed from the Meeus "Astronomical
+Algorithms" low-precision Sun/Moon theories (truncated series) -- standard,
+public formulas accurate to a fraction of a degree. The PHASE comes from the
+true Sun-Moon elongation, NOT a linear days-since-a-fixed-new-moon estimate
+(that drifts ~1 day and flips the label right at a boundary).
 
-The BIAS TABLES below (MOON_PHASE_BIAS, ZODIAC_ELEMENT_BIAS) are what turn
-"it's a Full Moon with the Moon in Scorpio" into an actual number the
-scoring engine can use. Nobody but you knows your real belief system here,
-so these are starting placeholders -- edit them freely. They're
-intentionally kept small (see FACTOR_WEIGHTS["moon_zodiac"] in config.py)
-so they nudge, not drive, the model.
+The BIAS TABLES below (MOON_PHASE_BIAS, ZODIAC_ELEMENT_BIAS) turn "Waxing
+Gibbous, Moon in Scorpio" into a number the scoring engine can use. Edit them
+freely; they're kept small (see FACTOR_WEIGHTS["moon_zodiac"]) so they nudge,
+not drive, the model.
 
 Signal convention: -1.0 .. +1.0, positive = leans toward the market FAVORITE,
-negative = leans toward the market UNDERDOG. engine/scoring.py converts this
-onto home/away using the moneyline before it reaches the grading factors.
+negative = leans toward the market UNDERDOG.
 """
 
 import math
@@ -41,16 +33,11 @@ from datetime import datetime, timezone
 SYNODIC_MONTH = 29.53058867
 REFERENCE_NEW_MOON = datetime(2000, 1, 6, 18, 14, tzinfo=timezone.utc)
 
-# Phase name by phase ANGLE (0deg = New, 90 = First Quarter, 180 = Full,
-# 270 = Last Quarter). The four PRINCIPAL phases only get a narrow +/-12deg
-# window (~1 day) around their exact instant; everything else is a
-# crescent/gibbous. An earlier version gave the principal phases a huge
-# +-0.0625-of-cycle (~1.85 day) band, which mislabeled e.g. an 8.5-day-old
-# 62%-illuminated Moon (clearly Waxing Gibbous) as "First Quarter". This
-# matches moongiant / theskylive / astro-seek day labels.
-PRINCIPAL_HALF_WINDOW = 12.0   # degrees on each side of 0/90/180/270
+# Phase name by Sun-Moon elongation (0deg = New, 90 = First Quarter,
+# 180 = Full, 270 = Last Quarter). The four PRINCIPAL phases only get a
+# narrow +/-12deg (~1 day) window; everything else is a crescent/gibbous.
 MOON_PHASE_ANGLE_BANDS = [
-    (12.0,  "New Moon"),          # 348..360 wraps to here too (handled in code)
+    (12.0,  "New Moon"),
     (78.0,  "Waxing Crescent"),
     (102.0, "First Quarter"),
     (168.0, "Waxing Gibbous"),
@@ -63,20 +50,16 @@ MOON_PHASE_ANGLE_BANDS = [
 
 # EDIT ME: your real read on how each phase should lean.
 MOON_PHASE_BIAS = {
-    "New Moon": 0.25,          # fresh-start energy -> favors the favorite / chalk
+    "New Moon": 0.25,
     "Waxing Crescent": 0.1,
     "First Quarter": 0.0,
     "Waxing Gibbous": -0.1,
-    "Full Moon": -0.3,         # folklore: chaos/upsets peak at full moon
+    "Full Moon": -0.3,
     "Waning Gibbous": -0.1,
     "Last Quarter": 0.0,
     "Waning Crescent": 0.15,
 }
 
-# Tropical zodiac slices, 30 degrees of ecliptic longitude each, starting at
-# the vernal equinox point (0 deg = Aries). This is astronomical geometry,
-# not a calendar table -- which sign the Moon is "in" depends on where it
-# actually is along this ring, not what today's date is.
 ZODIAC_SIGN_ORDER = [
     "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
     "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
@@ -91,24 +74,11 @@ ZODIAC_ELEMENT = {
 
 # EDIT ME: your real read on how each element should lean.
 ZODIAC_ELEMENT_BIAS = {
-    "fire": 0.2,     # aggressive energy -> favors the favorite
-    "earth": 0.15,   # steady energy -> mildly favors the favorite
-    "air": -0.05,    # unpredictable -> mild lean underdog
-    "water": -0.2,   # emotional/volatile -> favors the underdog / upset
+    "fire": 0.2,
+    "earth": 0.15,
+    "air": -0.05,
+    "water": -0.2,
 }
-
-
-def moon_phase_for(d):
-    """Returns (phase_name, illumination_fraction 0..1) for date `d`."""
-    dt = datetime(d.year, d.month, d.day, 12, 0, tzinfo=timezone.utc)
-    days_since = (dt - REFERENCE_NEW_MOON).total_seconds() / 86400.0
-    phase_frac = (days_since % SYNODIC_MONTH) / SYNODIC_MONTH  # 0..1 (0 = new, 0.5 = full)
-    illumination = (1 - math.cos(2 * math.pi * phase_frac)) / 2
-    angle = phase_frac * 360.0
-    for upper, name in MOON_PHASE_ANGLE_BANDS:
-        if angle < upper:
-            return name, round(illumination, 3)
-    return "New Moon", round(illumination, 3)
 
 
 def _julian_day(y, m, d, hour=12.0):
@@ -125,13 +95,10 @@ def _norm_deg(deg):
 
 
 def moon_ecliptic_longitude(d):
-    """Geocentric ecliptic longitude of the Moon (0-360 deg) at 12:00 UTC on
-    date `d`, via Meeus' low-precision lunar theory (truncated ELP2000
-    series -- the top ~20 amplitude terms). Accurate to a fraction of a
-    degree, which is all that's needed to place it in the right 30-degree
-    zodiac slice."""
+    """Geocentric ecliptic longitude of the Moon (0-360 deg) at 12:00 UTC via
+    Meeus' truncated ELP2000 series -- accurate to a fraction of a degree."""
     jd = _julian_day(d.year, d.month, d.day, 12.0)
-    t = (jd - 2451545.0) / 36525.0  # Julian centuries since J2000.0
+    t = (jd - 2451545.0) / 36525.0
 
     Lp = _norm_deg(218.3164477 + 481267.88123421 * t - 0.0015786 * t**2 + t**3 / 538841 - t**4 / 65194000)
     D = _norm_deg(297.8501921 + 445267.1114034 * t - 0.0018819 * t**2 + t**3 / 545868 - t**4 / 113065000)
@@ -167,9 +134,32 @@ def moon_ecliptic_longitude(d):
     return _norm_deg(Lp + delta_l)
 
 
+def _sun_ecliptic_longitude(d):
+    """Geocentric ecliptic longitude of the Sun (0-360 deg) at 12:00 UTC via
+    Meeus' low-precision solar theory."""
+    jd = _julian_day(d.year, d.month, d.day, 12.0)
+    t = (jd - 2451545.0) / 36525.0
+    L0 = _norm_deg(280.46646 + 36000.76983 * t + 0.0003032 * t**2)
+    M = math.radians(_norm_deg(357.52911 + 35999.05029 * t - 0.0001537 * t**2))
+    C = ((1.914602 - 0.004817 * t - 0.000014 * t**2) * math.sin(M)
+         + (0.019993 - 0.000101 * t) * math.sin(2 * M)
+         + 0.000289 * math.sin(3 * M))
+    return _norm_deg(L0 + C)
+
+
+def moon_phase_for(d):
+    """Returns (phase_name, illumination_fraction 0..1) from the true
+    Sun-Moon elongation. Elongation 0=new, 90=first quarter, 180=full."""
+    elongation = _norm_deg(moon_ecliptic_longitude(d) - _sun_ecliptic_longitude(d))
+    illumination = (1 - math.cos(math.radians(elongation))) / 2
+    for upper, name in MOON_PHASE_ANGLE_BANDS:
+        if elongation < upper:
+            return name, round(illumination, 3)
+    return "New Moon", round(illumination, 3)
+
+
 def moon_sign_for(d):
-    """The zodiac sign the MOON is currently transiting on date `d` (not the
-    sun-sign for the calendar date -- see module docstring)."""
+    """The zodiac sign the MOON is currently transiting on date `d`."""
     longitude = moon_ecliptic_longitude(d)
     return ZODIAC_SIGN_ORDER[int(longitude // 30) % 12]
 
